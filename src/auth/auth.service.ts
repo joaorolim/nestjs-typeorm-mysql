@@ -1,26 +1,31 @@
-import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { User } from '@prisma/client';
-import { PrismaService } from 'src/prisma/prisma.service';
-import { UserService } from 'src/user/user.service';
 import { AuthRegisterDTO } from './dto/auth-register.dto';
 import * as bcrypt from 'bcrypt';
 import { MailerService } from '@nestjs-modules/mailer';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { UserService } from '../user/user.service';
+import { UserEntity } from '../user/entity/user.entity';
 
 @Injectable()
 export class AuthService {
-
-  private issuer = 'login'; 
+  private issuer = 'login';
   private audience = 'users';
-  
+
   constructor(
     private readonly jwtService: JwtService,
-    private readonly prisma: PrismaService,
     private readonly userService: UserService,
-    private readonly mailer: MailerService
+    private readonly mailer: MailerService,
+    @InjectRepository(UserEntity)
+    private usersRepository: Repository<UserEntity>,
   ) {}
 
-  createToken(user: User) {
+  createToken(user: UserEntity) {
     // Math.floor(Date.now() / 1000) + 60 * 60; --> 1 hora no futuro
     // Math.floor(Date.now() / 1000) + 60; --> 1 minuto no futuro
 
@@ -44,9 +49,9 @@ export class AuthService {
 
   checkToken(token: string) {
     try {
-      const data = this.jwtService.verify(token, { 
+      const data = this.jwtService.verify(token, {
         audience: this.audience,
-        issuer: this.issuer, 
+        issuer: this.issuer,
       });
 
       return data;
@@ -65,28 +70,27 @@ export class AuthService {
   }
 
   async login(email: string, password: string) {
-
     // console.log(process.env);
 
-    const user = await this.prisma.user.findFirst({
-      where: { email },
+    const user = await this.usersRepository.findOne({
+      where: {
+        email,
+      },
     });
 
     if (!user) {
       throw new UnauthorizedException('E-mail e/ou senha inválidos!');
     }
 
-    if (!await bcrypt.compare(password, user.password)) {
-      throw new UnauthorizedException('E-mail e/ou senha inválidos!');
+    if (!(await bcrypt.compare(password, user.password))) {
+      throw new UnauthorizedException('Oopss.. E-mail e/ou senha inválidos!');
     }
 
     return this.createToken(user);
   }
 
   async forget(email: string) {
-    const user = await this.prisma.user.findFirst({
-      where: { email },
-    });
+    const user = await this.usersRepository.findOneBy({ email });
 
     if (!user) {
       throw new UnauthorizedException('E-mail inválido ou inexistente!');
@@ -104,7 +108,6 @@ export class AuthService {
         // notBefore: "60 seconds",
       },
     );
-  
 
     await this.mailer.sendMail({
       to: 'pjrolim@yahoo.com.br',
@@ -113,19 +116,20 @@ export class AuthService {
       context: {
         name: user.name,
         token,
-      }
+      },
     });
 
-    return true;
+    return { success: true };
   }
 
   async reset(password: string, token: string) {
-    
     try {
-      const data:any = this.jwtService.verify(token, { 
+      const data: any = this.jwtService.verify(token, {
         audience: this.audience,
-        issuer: 'forget', 
+        issuer: 'forget',
       });
+
+      console.log(data);
 
       if (isNaN(Number(data.id))) {
         throw new BadRequestException('Token inválido ou expirado!');
@@ -134,21 +138,26 @@ export class AuthService {
       const salt = await bcrypt.genSalt();
       password = await bcrypt.hash(password, salt);
 
-      const user = await this.prisma.user.update({
-        where: { id: Number(data.id) },
-        data: { password },
+      await this.usersRepository.update(Number(data.id), {
+        password,
       });
+
+      const user = await this.userService.show(Number(data.id));
+
+      console.log(user);
 
       // TODO: Enviar e-mail de confirmação
       return this.createToken(user);
-
     } catch (e) {
       throw new UnauthorizedException(e);
     }
-
   }
 
-  async register(data: AuthRegisterDTO){
+  async register(data: AuthRegisterDTO) {
+    // Se por acaso vier algum Role, deleta por segurança.
+    // E como padrão, será cadastrado como ROLE.USER
+    delete data.role;
+
     const user = await this.userService.create(data);
 
     return this.createToken(user);
